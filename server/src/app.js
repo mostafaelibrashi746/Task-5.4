@@ -2,6 +2,8 @@ import express from 'express';
 import morgan from 'morgan';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import { doubleCsrf } from 'csrf-csrf';
+import { rateLimit } from 'express-rate-limit';
 import authRoutes from './routes/auth.js';
 import bookingRoutes from './routes/bookings.js';
 import userRoutes from './routes/users.js';
@@ -19,12 +21,38 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+const { generateCsrfToken, doubleCsrfProtection } = doubleCsrf({
+  getSecret: () => process.env.CSRF_SECRET || process.env.JWT_SECRET,
+  getSessionIdentifier: (req) => req.cookies?.token || req.ip,
+  cookieName: 'csrf-token',
+  cookieOptions: { httpOnly: true, sameSite: 'lax', secure: false, path: '/' },
+  getCsrfTokenFromRequest: (req) => req.headers['x-csrf-token']
+});
+
+// Pre-authentication endpoints must remain available before a session exists.
+app.use('/api', (req, res, next) => {
+  if (req.method === 'POST' && ['/auth/login', '/auth/register'].includes(req.path)) return next();
+  return doubleCsrfProtection(req, res, next);
+});
+
+app.get('/api/csrf-token', (req, res) => {
+  res.json({ csrfToken: generateCsrfToken(req, res) });
+});
+
+const maintenanceLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { message: 'Too many maintenance requests. Please try again later.' }
+});
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/users', userRoutes);
-app.use('/api/maintenance', maintenanceRoutes);
+app.use('/api/maintenance', maintenanceLimiter, maintenanceRoutes);
 
 // Not found
 app.use((req, res) => {
